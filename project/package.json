@@ -1,0 +1,19 @@
+{
+  "name": "hms-blockchain-ethereum",
+  "version": "1.0.0",
+  "description": "Hospital Management System with Ethereum Blockchain Integration",
+  "main": "index.js",
+  "scripts": {
+    "dev:backend": "cd hms/backend && npm run dev",
+    "dev:frontend": "cd hms/frontend && npm start",
+    "blockchain:compile": "cd blockchain && npx hardhat compile",
+    "blockchain:test": "cd blockchain && npx hardhat test",
+    "blockchain:deploy:local": "cd blockchain && npx hardhat run scripts/deploy.js --network localhost",
+    "blockchain:deploy:mumbai": "cd blockchain && npx hardhat run scripts/deploy.js --network mumbai",
+    "blockchain:verify": "cd blockchain && npx hardhat verify --network mumbai",
+    "blockchain:node": "cd blockchain && npx hardhat node"
+  },
+  "keywords": ["hospital", "blockchain", "ethereum", "medical-records"],
+  "author": "Your Name",
+  "license": "MIT"
+}
