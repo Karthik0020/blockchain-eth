@@ -1,8 +1,8 @@
+import React, { useState, useEffect, useCallback } from 'react';
 import { api } from "../libs/api";
 import { Alert } from "./Alert";
 import { LoadingSpinner } from "./LoadingSpinner";
 import { BlockchainStatus } from "./BlockchainStatus";
-import { useState, useEffect } from 'react';
 import blockchainService from '../services/blockchainService';
 
 import { 
@@ -33,30 +33,91 @@ export const Blockchain = () => {
   const [verifyHash, setVerifyHash] = useState('');
   const [verifyResult, setVerifyResult] = useState(null);
   const [verifyLoading, setVerifyLoading] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
 
-  useEffect(() => {
-    fetchBlockchainData();
-  }, []);
-
-  const fetchBlockchainData = async () => {
+  // Fetch blockchain data with proper error handling
+  const fetchBlockchainData = useCallback(async () => {
     try {
       setLoading(true);
+      setError(null);
+      
+      // Check if blockchain service is connected
+      const connected = blockchainService.isConnected();
+      setIsConnected(connected);
       
       // Fetch blockchain stats from backend
-      const statsResponse = await api.get('/blockchain/stats');
-      if (statsResponse.success) {
-        setBlockchainStats(statsResponse.stats);
-        setVerification({ isValid: true, blockCount: statsResponse.stats.totalRecords });
-      }
+      const response = await api.get('/blockchain/stats');
+      console.log('Blockchain stats response:', response);
       
-      setError(null);
+      if (response.success) {
+        setBlockchainStats(response.stats);
+        setVerification({ 
+          isValid: true, 
+          blockCount: response.stats.totalRecords,
+          message: 'Blockchain connected successfully'
+        });
+      } else {
+        // Handle case where blockchain is not available
+        setBlockchainStats({
+          totalRecords: 0,
+          totalPatients: 0,
+          contractAddress: null,
+          network: null
+        });
+        setVerification({ 
+          isValid: false, 
+          error: response.error || 'Blockchain not available',
+          message: response.error || 'Contract not deployed or network issues'
+        });
+      }
     } catch (error) {
-      setError('Failed to load blockchain data');
       console.error('Error fetching blockchain data:', error);
+      setError('Failed to load blockchain data: ' + error.message);
+      
+      // Set default values when blockchain is not available
+      setBlockchainStats({
+        totalRecords: 0,
+        totalPatients: 0,
+        contractAddress: null,
+        network: null
+      });
+      setVerification({ 
+        isValid: false, 
+        error: 'Connection failed',
+        message: 'Unable to connect to blockchain service'
+      });
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  // Auto-refresh blockchain data every 30 seconds
+  useEffect(() => {
+    fetchBlockchainData();
+    
+    const interval = setInterval(() => {
+      fetchBlockchainData();
+    }, 30000); // Refresh every 30 seconds
+
+    return () => clearInterval(interval);
+  }, [fetchBlockchainData]);
+
+  // Listen for blockchain events
+  useEffect(() => {
+    const handleBlockchainUpdate = () => {
+      console.log('Blockchain update detected, refreshing data...');
+      fetchBlockchainData();
+    };
+
+    // Listen for custom events that might be fired when records are created
+    window.addEventListener('blockchain-update', handleBlockchainUpdate);
+    window.addEventListener('record-created', handleBlockchainUpdate);
+
+    return () => {
+      window.removeEventListener('blockchain-update', handleBlockchainUpdate);
+      window.removeEventListener('record-created', handleBlockchainUpdate);
+    };
+  }, [fetchBlockchainData]);
 
   const handleVerifyRecord = async () => {
     if (!verifyHash.trim()) {
@@ -66,6 +127,7 @@ export const Blockchain = () => {
 
     setVerifyLoading(true);
     setVerifyResult(null);
+    setError(null);
 
     try {
       // Try frontend verification first if connected
@@ -78,8 +140,8 @@ export const Blockchain = () => {
         setVerifyResult(result);
       }
     } catch (error) {
-      setError('Failed to verify record');
       console.error('Error verifying record:', error);
+      setError('Failed to verify record: ' + error.message);
     } finally {
       setVerifyLoading(false);
     }
@@ -87,6 +149,7 @@ export const Blockchain = () => {
 
   const handleGetRecordDetails = async (recordHash) => {
     try {
+      setError(null);
       let result;
       
       if (blockchainService.isConnected()) {
@@ -102,39 +165,56 @@ export const Blockchain = () => {
         setError(result.error || 'Failed to get record details');
       }
     } catch (error) {
-      setError('Failed to get record details');
       console.error('Error getting record details:', error);
+      setError('Failed to get record details: ' + error.message);
     }
   };
 
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      // You could add a toast notification here
+    } catch (error) {
+      console.error('Failed to copy to clipboard:', error);
+    }
   };
 
   const formatTimestamp = (timestamp) => {
+    if (!timestamp) return 'N/A';
     return new Date(timestamp * 1000).toLocaleString();
+  };
+
+  const formatAddress = (address) => {
+    if (!address) return 'N/A';
+    return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
 
   if (loading) return <LoadingSpinner message="Loading blockchain data..." />;
 
   return (
     <div className="space-y-8 animate-fadeIn">
-      {error && <Alert type="error\" message={error} onClose={() => setError(null)} />}
+      {error && (
+        <Alert 
+          type="error" 
+          message={error} 
+          onClose={() => setError(null)} 
+        />
+      )}
       
       {/* Hero Section */}
-      <div className="relative overflow-hidden bg-gradient-to-br from-black to-black backdrop-blur-xl rounded-3xl border border-white p-8 hover:border-gray-600/50 transition-all duration-500 hover:scale-10 hover:shadow-2xl hover:shadow-purple-500/10">
-        <div className="absolute inset-0 bg-gradient-to-r from-black to-black border-white"></div>
+      <div className="relative overflow-hidden bg-gradient-to-br from-gray-900 to-black backdrop-blur-xl rounded-3xl border border-gray-700 p-8 hover:border-gray-600/50 transition-all duration-500 hover:scale-[1.02] hover:shadow-2xl hover:shadow-purple-500/10">
+        <div className="absolute inset-0 bg-gradient-to-r from-purple-900/20 to-blue-900/20"></div>
         <div className="relative z-10">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-4 mb-6">
-              <div className="w-16 h-16 bg-gradient-to-br from-black to-purple-800 rounded-2xl flex items-center border-purple-500 justify-center">
+              <div className="w-16 h-16 bg-gradient-to-br from-purple-600 to-purple-800 rounded-2xl flex items-center justify-center border border-purple-500/30">
                 <Shield className="h-8 w-8 text-white" />
               </div>
               <div>
-                <h1 className="text-4xl font-bold bg-gradient-to-r from-white via-purple-400 to-purple-950 bg-clip-text text-transparent">
+                <h1 className="text-4xl font-bold bg-gradient-to-r from-white via-purple-400 to-purple-600 bg-clip-text text-transparent">
                   Ethereum Blockchain
                 </h1>
-                <h2 className="text-4xl font-bold bg-gradient-to-r from-white via-purple-400 to-purple-950 bg-clip-text text-transparent">
+                <h2 className="text-2xl font-semibold bg-gradient-to-r from-gray-300 to-purple-300 bg-clip-text text-transparent">
                   Security Ledger
                 </h2>
               </div>
@@ -150,12 +230,12 @@ export const Blockchain = () => {
                   {verification.isValid ? (
                     <div className="flex items-center gap-2">
                       <CheckCircle className="h-4 w-4" />
-                      Blockchain Verified
+                      Blockchain Available
                     </div>
                   ) : (
                     <div className="flex items-center gap-2">
                       <AlertCircle className="h-4 w-4" />
-                      Blockchain Invalid
+                      Blockchain Unavailable
                     </div>
                   )}
                 </div>
@@ -163,50 +243,58 @@ export const Blockchain = () => {
               
               <button
                 onClick={fetchBlockchainData}
-                className="flex items-center space-x-2 px-6 py-3 bg-gradient-to-r from-black to-purple-800 rounded-xl text-white font-medium transition-all duration-300 hover:scale-105 hover:shadow-lg border border-purple-500/30 hover:border-purple-400/50"
+                disabled={loading}
+                className="flex items-center space-x-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-800 rounded-xl text-white font-medium transition-all duration-300 hover:scale-105 hover:shadow-lg border border-purple-500/30 hover:border-purple-400/50 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <RefreshCw className="h-4 w-4" />
+                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                 <span>Refresh</span>
               </button>
             </div>
           </div>
           
           <p className="text-gray-300 text-lg max-w-2xl mb-8">
-            Immutable medical record hashes secured on Ethereum blockchain with MetaMask integration.
+            {verification?.isValid 
+              ? "Immutable medical record hashes secured on Ethereum blockchain with MetaMask integration."
+              : verification?.message || "Blockchain integration is currently unavailable. Medical records are stored locally."
+            }
           </p>
 
           {/* Quick Stats */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-black backdrop-blur-sm rounded-xl p-4 border border-gray-300 hover:border-gray-600/50 transition-all duration-500 hover:scale-105 hover:shadow-2xl hover:shadow-purple-500/10">
+            <div className="bg-gray-900/50 backdrop-blur-sm rounded-xl p-4 border border-gray-700 hover:border-gray-600/50 transition-all duration-500 hover:scale-105 hover:shadow-2xl hover:shadow-blue-500/10">
               <div className="flex items-center space-x-2">
-                <Database className="h-5 w-5 text-purple-200" />
+                <Database className="h-5 w-5 text-purple-400" />
                 <span className="text-sm text-gray-300">Total Records</span>
               </div>
-              <p className="text-2xl font-bold text-purple-200 mt-1">{blockchainStats?.totalRecords || 0}</p>
+              <p className="text-2xl font-bold text-purple-400 mt-1">
+                {blockchainStats?.totalRecords || 0}
+              </p>
             </div>
-            <div className="bg-black backdrop-blur-sm rounded-xl p-4 border border-gray-300 hover:border-gray-600/50 transition-all duration-500 hover:scale-105 hover:shadow-2xl hover:shadow-green-500/10">
+            <div className="bg-gray-900/50 backdrop-blur-sm rounded-xl p-4 border border-gray-700 hover:border-gray-600/50 transition-all duration-500 hover:scale-105 hover:shadow-2xl hover:shadow-green-500/10">
               <div className="flex items-center space-x-2">
-                <Lock className="h-5 w-5 text-green-200" />
+                <Lock className="h-5 w-5 text-green-400" />
                 <span className="text-sm text-gray-300">Patients</span>
               </div>
-              <p className="text-2xl font-bold text-green-200 mt-1">{blockchainStats?.totalPatients || 0}</p>
+              <p className="text-2xl font-bold text-green-400 mt-1">
+                {blockchainStats?.totalPatients || 0}
+              </p>
             </div>
-            <div className="bg-black backdrop-blur-sm rounded-xl p-4 border border-gray-300 hover:border-gray-600/50 transition-all duration-500 hover:scale-105 hover:shadow-2xl hover:shadow-blue-500/10">
+            <div className="bg-gray-900/50 backdrop-blur-sm rounded-xl p-4 border border-gray-700 hover:border-gray-600/50 transition-all duration-500 hover:scale-105 hover:shadow-2xl hover:shadow-blue-500/10">
               <div className="flex items-center space-x-2">
-                <Activity className="h-5 w-5 text-blue-200" />
+                <Activity className="h-5 w-5 text-blue-400" />
                 <span className="text-sm text-gray-300">Network</span>
               </div>
-              <p className="text-2xl font-bold text-blue-200 mt-1">
+              <p className="text-2xl font-bold text-blue-400 mt-1">
                 {blockchainStats?.network?.name || 'Disconnected'}
               </p>
             </div>
-            <div className="bg-black backdrop-blur-sm rounded-xl p-4 border border-gray-300 hover:border-gray-600/50 transition-all duration-500 hover:scale-105 hover:shadow-2xl hover:shadow-yellow-500/10">
+            <div className="bg-gray-900/50 backdrop-blur-sm rounded-xl p-4 border border-gray-700 hover:border-gray-600/50 transition-all duration-500 hover:scale-105 hover:shadow-2xl hover:shadow-yellow-500/10">
               <div className="flex items-center space-x-2">
-                <Zap className="h-5 w-5 text-yellow-200" />
+                <Zap className="h-5 w-5 text-yellow-400" />
                 <span className="text-sm text-gray-300">Status</span>
               </div>
-              <p className="text-2xl font-bold text-yellow-200 mt-1">
-                {blockchainService.isConnected() ? 'Connected' : 'Offline'}
+              <p className="text-2xl font-bold text-yellow-400 mt-1">
+                {verification?.isValid ? 'Connected' : 'Offline'}
               </p>
             </div>
           </div>
@@ -214,10 +302,10 @@ export const Blockchain = () => {
       </div>
 
       {/* Blockchain Connection Status */}
-      <BlockchainStatus />
+      <BlockchainStatus onUpdate={fetchBlockchainData} />
 
       {/* Record Verification Section */}
-      <div className="bg-gradient-to-br from-black to-black backdrop-blur-xl rounded-2xl border border-gray-700/50 p-6">
+      <div className="bg-gradient-to-br from-gray-900 to-black backdrop-blur-xl rounded-2xl border border-gray-700/50 p-6">
         <div className="flex items-center space-x-3 mb-6">
           <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center">
             <Search className="h-5 w-5 text-white" />
@@ -235,11 +323,11 @@ export const Blockchain = () => {
               placeholder="Enter record hash (0x...)"
               value={verifyHash}
               onChange={(e) => setVerifyHash(e.target.value)}
-              className="flex-1 px-4 py-3 bg-black border border-gray-600 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
+              className="flex-1 px-4 py-3 bg-gray-800 border border-gray-600 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
             />
             <button
               onClick={handleVerifyRecord}
-              disabled={verifyLoading || !verifyHash.trim()}
+              disabled={verifyLoading || !verifyHash.trim() || !verification?.isValid}
               className="px-6 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-xl font-medium transition-all duration-300 hover:scale-105 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {verifyLoading ? (
@@ -250,6 +338,15 @@ export const Blockchain = () => {
               Verify
             </button>
           </div>
+
+          {!verification?.isValid && (
+            <div className="p-4 rounded-xl border bg-yellow-500/10 border-yellow-500/20 text-yellow-400">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-5 w-5" />
+                <span>{verification?.message || 'Blockchain verification is currently unavailable. Please check your connection or deploy the smart contract.'}</span>
+              </div>
+            </div>
+          )}
 
           {verifyResult && (
             <div className={`p-4 rounded-xl border ${
@@ -284,7 +381,7 @@ export const Blockchain = () => {
       {/* Record Detail Modal */}
       {selectedRecord && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="relative bg-gradient-to-br from-black to-gray-900 backdrop-blur-xl rounded-3xl border border-gray-700/50 p-8 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-gradient-to-br from-gray-900 to-black backdrop-blur-xl rounded-3xl border border-gray-700/50 p-8 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-2xl font-bold bg-gradient-to-r from-white via-purple-400 to-purple-600 bg-clip-text text-transparent">
                 Blockchain Record Details
@@ -304,7 +401,7 @@ export const Blockchain = () => {
                     <Hash className="h-4 w-4 mr-2" />
                     Patient ID
                   </label>
-                  <div className="bg-black/50 p-3 rounded-lg text-sm text-purple-200 flex items-center justify-between">
+                  <div className="bg-gray-800/50 p-3 rounded-lg text-sm text-purple-300 flex items-center justify-between">
                     <span>{selectedRecord.patientId}</span>
                     <button
                       onClick={() => copyToClipboard(selectedRecord.patientId)}
@@ -320,7 +417,7 @@ export const Blockchain = () => {
                     <Clock className="h-4 w-4 mr-2" />
                     Timestamp
                   </label>
-                  <div className="bg-black/50 p-3 rounded-lg text-sm text-blue-200">
+                  <div className="bg-gray-800/50 p-3 rounded-lg text-sm text-blue-300">
                     {formatTimestamp(selectedRecord.timestamp)}
                   </div>
                 </div>
@@ -331,7 +428,7 @@ export const Blockchain = () => {
                   <Shield className="h-4 w-4 mr-2" />
                   Record Hash
                 </label>
-                <div className="bg-black/50 p-3 rounded-lg text-sm font-mono break-all text-green-200 flex items-center justify-between">
+                <div className="bg-gray-800/50 p-3 rounded-lg text-sm font-mono break-all text-green-300 flex items-center justify-between">
                   <span>{selectedRecord.recordHash}</span>
                   <button
                     onClick={() => copyToClipboard(selectedRecord.recordHash)}
@@ -347,7 +444,7 @@ export const Blockchain = () => {
                   <Activity className="h-4 w-4 mr-2" />
                   Record Type
                 </label>
-                <div className="bg-black/50 p-3 rounded-lg">
+                <div className="bg-gray-800/50 p-3 rounded-lg">
                   <span className="text-sm px-3 py-1 rounded-full font-medium bg-gradient-to-r from-purple-500/20 to-purple-600/20 text-purple-300 border border-purple-500/30">
                     {selectedRecord.recordType}
                   </span>
@@ -359,8 +456,8 @@ export const Blockchain = () => {
                   <Link className="h-4 w-4 mr-2" />
                   Authorized By
                 </label>
-                <div className="bg-black/50 p-3 rounded-lg text-sm font-mono break-all text-yellow-200 flex items-center justify-between">
-                  <span>{selectedRecord.authorizedBy}</span>
+                <div className="bg-gray-800/50 p-3 rounded-lg text-sm font-mono break-all text-yellow-300 flex items-center justify-between">
+                  <span>{formatAddress(selectedRecord.authorizedBy)}</span>
                   <div className="flex items-center space-x-2">
                     <button
                       onClick={() => copyToClipboard(selectedRecord.authorizedBy)}
@@ -386,7 +483,7 @@ export const Blockchain = () => {
             <div className="mt-8">
               <button
                 onClick={() => setSelectedRecord(null)}
-                className="px-6 py-3 bg-gradient-to-r from-black to-gray-800 rounded-xl text-white font-medium transition-all duration-300 hover:scale-105 hover:shadow-lg border border-gray-600/50 hover:border-gray-500/50"
+                className="px-6 py-3 bg-gradient-to-r from-gray-700 to-gray-800 rounded-xl text-white font-medium transition-all duration-300 hover:scale-105 hover:shadow-lg border border-gray-600/50 hover:border-gray-500/50"
               >
                 Close
               </button>
@@ -396,8 +493,8 @@ export const Blockchain = () => {
       )}
 
       {/* Contract Information */}
-      {blockchainStats && (
-        <div className="bg-gradient-to-br from-black to-black backdrop-blur-xl rounded-2xl border border-gray-700/50 p-6">
+      {blockchainStats && blockchainStats.contractAddress && (
+        <div className="bg-gradient-to-br from-gray-900 to-black backdrop-blur-xl rounded-2xl border border-gray-700/50 p-6">
           <div className="flex items-center space-x-3 mb-6">
             <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl flex items-center justify-center">
               <Database className="h-5 w-5 text-white" />
@@ -410,10 +507,10 @@ export const Blockchain = () => {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-4">
-              <div className="bg-black/30 rounded-xl p-4">
+              <div className="bg-gray-800/30 rounded-xl p-4">
                 <p className="text-sm text-gray-400 mb-2">Contract Address</p>
                 <div className="flex items-center justify-between">
-                  <p className="text-sm text-white font-mono">{blockchainService.formatAddress(blockchainStats.contractAddress)}</p>
+                  <p className="text-sm text-white font-mono">{formatAddress(blockchainStats.contractAddress)}</p>
                   <div className="flex items-center space-x-2">
                     <button
                       onClick={() => copyToClipboard(blockchainStats.contractAddress)}
@@ -421,9 +518,9 @@ export const Blockchain = () => {
                     >
                       <Copy className="h-4 w-4" />
                     </button>
-                    {blockchainStats.network && (
+                    {blockchainStats.network?.blockExplorerUrls?.[0] && (
                       <a
-                        href={blockchainService.getExplorerUrl(blockchainStats.contractAddress)}
+                        href={`${blockchainStats.network.blockExplorerUrls[0]}address/${blockchainStats.contractAddress}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-gray-400 hover:text-white transition-colors"
@@ -435,19 +532,19 @@ export const Blockchain = () => {
                 </div>
               </div>
 
-              <div className="bg-black/30 rounded-xl p-4">
+              <div className="bg-gray-800/30 rounded-xl p-4">
                 <p className="text-sm text-gray-400 mb-2">Network</p>
-                <p className="text-sm text-white">{blockchainStats.network?.name} (Chain ID: {blockchainStats.network?.chainId})</p>
+                <p className="text-sm text-white">{blockchainStats.network?.name || 'Unknown'} (Chain ID: {blockchainStats.network?.chainId || 'N/A'})</p>
               </div>
             </div>
 
             <div className="space-y-4">
-              <div className="bg-black/30 rounded-xl p-4">
+              <div className="bg-gray-800/30 rounded-xl p-4">
                 <p className="text-sm text-gray-400 mb-2">Total Patients</p>
                 <p className="text-2xl font-bold text-blue-400">{blockchainStats.totalPatients}</p>
               </div>
 
-              <div className="bg-black/30 rounded-xl p-4">
+              <div className="bg-gray-800/30 rounded-xl p-4">
                 <p className="text-sm text-gray-400 mb-2">Total Records</p>
                 <p className="text-2xl font-bold text-purple-400">{blockchainStats.totalRecords}</p>
               </div>
@@ -457,18 +554,25 @@ export const Blockchain = () => {
       )}
 
       {/* No Data State */}
-      {!blockchainStats && !loading && (
-        <div className="text-center py-16 bg-gradient-to-br from-black to-black backdrop-blur-xl rounded-2xl border border-gray-700/50">
+      {(!blockchainStats || !verification?.isValid) && !loading && (
+        <div className="text-center py-16 bg-gradient-to-br from-gray-900 to-black backdrop-blur-xl rounded-2xl border border-gray-700/50">
           <div className="w-24 h-24 bg-gradient-to-br from-purple-500/20 to-purple-600/20 rounded-3xl flex items-center justify-center mx-auto mb-6">
             <Shield className="h-12 w-12 text-purple-400" />
           </div>
-          <h3 className="text-xl font-bold text-white mb-2">No Blockchain Data</h3>
-          <p className="text-gray-400 mb-6">Connect your wallet and ensure the contract is deployed to view blockchain data.</p>
+          <h3 className="text-xl font-bold text-white mb-2">Blockchain Not Available</h3>
+          <p className="text-gray-400 mb-6">The blockchain integration is currently unavailable. This could be due to:</p>
+          <ul className="text-gray-400 text-sm mb-6 space-y-1">
+            <li>• Smart contract not deployed</li>
+            <li>• Network connection issues</li>
+            <li>• Missing environment configuration</li>
+            <li>• MetaMask not connected</li>
+          </ul>
           <button
             onClick={fetchBlockchainData}
-            className="bg-gradient-to-r from-purple-500 to-purple-600 text-white px-6 py-3 rounded-xl font-medium transition-all duration-300 hover:scale-105 hover:shadow-lg"
+            disabled={loading}
+            className="bg-gradient-to-r from-purple-500 to-purple-600 text-white px-6 py-3 rounded-xl font-medium transition-all duration-300 hover:scale-105 hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Retry Connection
+            {loading ? 'Connecting...' : 'Retry Connection'}
           </button>
         </div>
       )}

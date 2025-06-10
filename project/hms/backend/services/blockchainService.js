@@ -26,26 +26,44 @@ class BlockchainService {
 
   async initialize() {
     try {
+      // Only initialize if we have the required environment variables
+      if (!process.env.ETHEREUM_RPC_URL || !process.env.PRIVATE_KEY || !process.env.HMS_CONTRACT_ADDRESS) {
+        console.log('Blockchain service: Missing required environment variables');
+        console.log('Required: ETHEREUM_RPC_URL, PRIVATE_KEY, HMS_CONTRACT_ADDRESS');
+        return;
+      }
+
       // Initialize provider
       this.provider = new ethers.JsonRpcProvider(process.env.ETHEREUM_RPC_URL);
       
-      // Initialize wallet
-      if (process.env.PRIVATE_KEY) {
-        this.wallet = new ethers.Wallet(process.env.PRIVATE_KEY, this.provider);
+      // Test provider connection
+      try {
+        await this.provider.getNetwork();
+      } catch (error) {
+        console.error('Failed to connect to blockchain network:', error.message);
+        return;
       }
+      
+      // Initialize wallet
+      this.wallet = new ethers.Wallet(process.env.PRIVATE_KEY, this.provider);
 
       // Initialize contract
-      if (process.env.HMS_CONTRACT_ADDRESS && this.wallet) {
-        this.contract = new ethers.Contract(
-          process.env.HMS_CONTRACT_ADDRESS,
-          HMS_CONTRACT_ABI,
-          this.wallet
-        );
-      }
+      this.contract = new ethers.Contract(
+        process.env.HMS_CONTRACT_ADDRESS,
+        HMS_CONTRACT_ABI,
+        this.wallet
+      );
 
-      console.log('Blockchain service initialized successfully');
+      // Test contract connection
+      try {
+        await this.contract.getTotalPatients();
+        console.log('Blockchain service initialized successfully');
+      } catch (error) {
+        console.error('Contract connection failed:', error.message);
+        this.contract = null;
+      }
     } catch (error) {
-      console.error('Failed to initialize blockchain service:', error);
+      console.error('Failed to initialize blockchain service:', error.message);
     }
   }
 
@@ -238,9 +256,10 @@ class BlockchainService {
         throw new Error('Contract not initialized');
       }
 
-      const [totalPatients, totalRecords] = await Promise.all([
+      const [totalPatients, totalRecords, network] = await Promise.all([
         this.contract.getTotalPatients(),
-        this.contract.getTotalRecords()
+        this.contract.getTotalRecords(),
+        this.provider.getNetwork()
       ]);
 
       return {
@@ -249,7 +268,10 @@ class BlockchainService {
           totalPatients: Number(totalPatients),
           totalRecords: Number(totalRecords),
           contractAddress: process.env.HMS_CONTRACT_ADDRESS,
-          network: await this.provider.getNetwork()
+          network: {
+            name: network.name,
+            chainId: Number(network.chainId)
+          }
         }
       };
     } catch (error) {
@@ -268,26 +290,30 @@ class BlockchainService {
       return;
     }
 
-    // Listen for patient registration events
-    this.contract.on('PatientRegistered', (patientId, identityHash, registeredBy, timestamp) => {
-      console.log('Patient registered on blockchain:', {
-        patientId,
-        identityHash,
-        registeredBy,
-        timestamp: Number(timestamp)
+    try {
+      // Listen for patient registration events
+      this.contract.on('PatientRegistered', (patientId, identityHash, registeredBy, timestamp) => {
+        console.log('Patient registered on blockchain:', {
+          patientId,
+          identityHash,
+          registeredBy,
+          timestamp: Number(timestamp)
+        });
       });
-    });
 
-    // Listen for record addition events
-    this.contract.on('RecordAdded', (patientId, recordHash, authorizedBy, recordType, timestamp) => {
-      console.log('Record added to blockchain:', {
-        patientId,
-        recordHash,
-        authorizedBy,
-        recordType,
-        timestamp: Number(timestamp)
+      // Listen for record addition events
+      this.contract.on('RecordAdded', (patientId, recordHash, authorizedBy, recordType, timestamp) => {
+        console.log('Record added to blockchain:', {
+          patientId,
+          recordHash,
+          authorizedBy,
+          recordType,
+          timestamp: Number(timestamp)
+        });
       });
-    });
+    } catch (error) {
+      console.error('Error setting up event listeners:', error);
+    }
   }
 }
 

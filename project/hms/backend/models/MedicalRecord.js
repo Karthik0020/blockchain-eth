@@ -1,15 +1,13 @@
 const mongoose = require('mongoose');
 
 const medicalRecordSchema = new mongoose.Schema({
-  // Traditional fields
+  // Traditional fields - using String for patientId and doctorId to handle both ObjectId and string references
   patientId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Patient',
+    type: mongoose.Schema.Types.Mixed, // Allow both ObjectId and String
     required: true
   },
   doctorId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Doctor',
+    type: mongoose.Schema.Types.Mixed, // Allow both ObjectId and String
     required: true
   },
   diagnosis: {

@@ -17,15 +17,14 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/hms_blockchain', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
+// Connect to MongoDB with updated options
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/hms_blockchain')
 .then(() => {
   console.log('Connected to MongoDB');
-  // Setup blockchain event listeners
-  blockchainService.setupEventListeners();
+  // Setup blockchain event listeners only if contract is available
+  if (process.env.HMS_CONTRACT_ADDRESS) {
+    blockchainService.setupEventListeners();
+  }
 })
 .catch((error) => {
   console.error('MongoDB connection error:', error);
@@ -50,19 +49,45 @@ let rooms = [];
 // Helper function to generate ID
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
-// Blockchain endpoints
+// Blockchain endpoints with better error handling
 app.get('/api/blockchain/stats', async (req, res) => {
   try {
+    if (!process.env.HMS_CONTRACT_ADDRESS) {
+      return res.json({
+        success: false,
+        error: 'Contract not deployed',
+        stats: {
+          totalPatients: 0,
+          totalRecords: 0,
+          contractAddress: null,
+          network: null
+        }
+      });
+    }
+
     const stats = await blockchainService.getBlockchainStats();
     res.json(stats);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to get blockchain stats' });
+    console.error('Blockchain stats error:', error.message);
+    res.json({
+      success: false,
+      error: error.message,
+      stats: {
+        totalPatients: 0,
+        totalRecords: 0,
+        contractAddress: process.env.HMS_CONTRACT_ADDRESS || null,
+        network: null
+      }
+    });
   }
 });
 
 app.post('/api/blockchain/verify-record', async (req, res) => {
   try {
     const { recordHash } = req.body;
+    if (!process.env.HMS_CONTRACT_ADDRESS) {
+      return res.json({ success: false, error: 'Contract not deployed' });
+    }
     const result = await blockchainService.verifyRecord(recordHash);
     res.json(result);
   } catch (error) {
@@ -73,6 +98,9 @@ app.post('/api/blockchain/verify-record', async (req, res) => {
 app.get('/api/blockchain/record/:hash', async (req, res) => {
   try {
     const { hash } = req.params;
+    if (!process.env.HMS_CONTRACT_ADDRESS) {
+      return res.json({ success: false, error: 'Contract not deployed' });
+    }
     const result = await blockchainService.getRecordDetails(hash);
     res.json(result);
   } catch (error) {
@@ -110,19 +138,21 @@ app.post('/api/patients', async (req, res) => {
       patient.generateBlockchainId();
       savedPatient = await patient.save();
 
-      // Register on blockchain
-      const blockchainResult = await blockchainService.registerPatient({
-        id: patient.blockchainId,
-        name: patient.name,
-        email: patient.email,
-        phone: patient.phone
-      });
+      // Register on blockchain only if contract is available
+      if (process.env.HMS_CONTRACT_ADDRESS) {
+        const blockchainResult = await blockchainService.registerPatient({
+          id: patient.blockchainId,
+          name: patient.name,
+          email: patient.email,
+          phone: patient.phone
+        });
 
-      if (blockchainResult.success) {
-        patient.blockchainRegistered = true;
-        patient.identityHash = blockchainResult.identityHash;
-        patient.registrationTxHash = blockchainResult.transactionHash;
-        await patient.save();
+        if (blockchainResult.success) {
+          patient.blockchainRegistered = true;
+          patient.identityHash = blockchainResult.identityHash;
+          patient.registrationTxHash = blockchainResult.transactionHash;
+          await patient.save();
+        }
       }
 
       res.status(201).json(savedPatient);
@@ -199,23 +229,32 @@ app.get('/api/medical-records', async (req, res) => {
     let query = { isActive: true };
     
     if (patientId) {
-      query.patientId = patientId;
+      // Handle both ObjectId and string patientId
+      try {
+        query.patientId = mongoose.Types.ObjectId.isValid(patientId) ? patientId : patientId;
+      } catch (err) {
+        query.patientId = patientId;
+      }
     }
 
     // Try MongoDB first
-    const mongoRecords = await MedicalRecord.find(query)
-      .populate('patientId', 'name')
-      .populate('doctorId', 'name')
-      .sort({ createdAt: -1 });
+    try {
+      const mongoRecords = await MedicalRecord.find(query)
+        .populate('patientId', 'name')
+        .populate('doctorId', 'name')
+        .sort({ createdAt: -1 });
 
-    if (mongoRecords.length > 0) {
-      const recordsWithDetails = mongoRecords.map(record => ({
-        ...record.toObject(),
-        patientName: record.patientId?.name || 'Unknown',
-        doctorName: record.doctorId?.name || 'Unknown'
-      }));
-      res.json(recordsWithDetails);
-      return;
+      if (mongoRecords.length > 0) {
+        const recordsWithDetails = mongoRecords.map(record => ({
+          ...record.toObject(),
+          patientName: record.patientId?.name || 'Unknown',
+          doctorName: record.doctorId?.name || 'Unknown'
+        }));
+        res.json(recordsWithDetails);
+        return;
+      }
+    } catch (mongoError) {
+      console.error('MongoDB query error:', mongoError);
     }
 
     // Fallback to in-memory
@@ -241,6 +280,7 @@ app.get('/api/medical-records', async (req, res) => {
   }
 });
 
+// Enhanced Medical Records POST endpoint with proper error handling
 app.post('/api/medical-records', async (req, res) => {
   try {
     const recordData = {
@@ -248,63 +288,260 @@ app.post('/api/medical-records', async (req, res) => {
       createdAt: new Date().toISOString()
     };
 
+    let savedRecord;
+    let useMongoStorage = true;
+
     try {
-      // Create record in MongoDB
-      const medicalRecord = new MedicalRecord(recordData);
-      const savedRecord = await medicalRecord.save();
-
-      // Store hash on blockchain
-      const recordForBlockchain = {
-        patientId: savedRecord.patientId.toString(),
-        diagnosis: savedRecord.diagnosis,
-        treatment: savedRecord.treatment,
-        date: savedRecord.date,
-        type: savedRecord.recordType
-      };
-
-      const blockchainResult = await blockchainService.addMedicalRecord(recordForBlockchain);
-
-      if (blockchainResult.success) {
-        savedRecord.blockchainStored = true;
-        savedRecord.recordHash = blockchainResult.recordHash;
-        savedRecord.transactionHash = blockchainResult.transactionHash;
-        savedRecord.blockNumber = blockchainResult.blockNumber;
-        await savedRecord.save();
+      // For MongoDB, we need to handle the ID references properly
+      let mongoRecordData = { ...recordData };
+      
+      // Handle patientId - check if it's a valid ObjectId or needs to be found/created
+      if (recordData.patientId && !mongoose.Types.ObjectId.isValid(recordData.patientId)) {
+        // Try to find patient by the provided ID in in-memory storage
+        const patient = patients.find(p => p.id === recordData.patientId);
+        if (patient) {
+          try {
+            // Check if patient already exists in MongoDB
+            let mongoPatient = await Patient.findOne({ 
+              $or: [
+                { name: patient.name, email: patient.email },
+                { phone: patient.phone }
+              ]
+            });
+            
+            if (!mongoPatient) {
+              // Create patient in MongoDB
+              mongoPatient = new Patient(patient);
+              mongoPatient.generateBlockchainId();
+              mongoPatient = await mongoPatient.save();
+            }
+            
+            mongoRecordData.patientId = mongoPatient._id;
+          } catch (err) {
+            console.log('Patient creation/lookup failed, using in-memory storage');
+            useMongoStorage = false;
+          }
+        } else {
+          console.log('Patient not found, using in-memory storage');
+          useMongoStorage = false;
+        }
       }
 
-      res.status(201).json(savedRecord);
+      // Handle doctorId - check if it's a valid ObjectId or needs special handling
+      if (useMongoStorage && recordData.doctorId && !mongoose.Types.ObjectId.isValid(recordData.doctorId)) {
+        // Try to find doctor by the provided ID in in-memory storage
+        const doctor = doctors.find(d => d.id === recordData.doctorId);
+        if (doctor) {
+          // For now, we'll use in-memory storage since we don't have a Doctor MongoDB model
+          // In a full implementation, you'd want to create a Doctor model and handle this properly
+          console.log('Doctor found in in-memory storage, but no MongoDB Doctor model available');
+          useMongoStorage = false;
+        } else {
+          console.log('Doctor not found, using in-memory storage');
+          useMongoStorage = false;
+        }
+      }
+
+      // If we can use MongoDB storage, proceed with it
+      if (useMongoStorage) {
+        // Create record in MongoDB
+        const medicalRecord = new MedicalRecord(mongoRecordData);
+        savedRecord = await medicalRecord.save();
+
+        // Store hash on blockchain only if contract is available
+        if (process.env.HMS_CONTRACT_ADDRESS) {
+          try {
+            const recordForBlockchain = {
+              patientId: savedRecord.patientId.toString(),
+              diagnosis: savedRecord.diagnosis,
+              treatment: savedRecord.treatment,
+              date: savedRecord.date,
+              type: savedRecord.recordType
+            };
+
+            const blockchainResult = await blockchainService.addMedicalRecord(recordForBlockchain);
+
+            if (blockchainResult.success) {
+              savedRecord.blockchainStored = true;
+              savedRecord.recordHash = blockchainResult.recordHash;
+              savedRecord.transactionHash = blockchainResult.transactionHash;
+              savedRecord.blockNumber = blockchainResult.blockNumber;
+              await savedRecord.save();
+            }
+          } catch (blockchainError) {
+            console.error('Blockchain storage failed (non-fatal):', blockchainError.message);
+            // Continue without blockchain storage
+          }
+        }
+
+        res.status(201).json(savedRecord);
+        return;
+      }
     } catch (mongoError) {
-      console.error('MongoDB error, using in-memory storage:', mongoError);
-      
-      // Fallback to in-memory storage
+      console.error('MongoDB error, falling back to in-memory storage:', mongoError.message);
+      useMongoStorage = false;
+    }
+
+    // Fallback to in-memory storage
+    if (!useMongoStorage) {
       const record = {
         id: generateId(),
         ...recordData
       };
+      
+      // Validate that referenced IDs exist in in-memory storage
+      if (recordData.patientId) {
+        const patient = patients.find(p => p.id === recordData.patientId);
+        if (!patient) {
+          return res.status(400).json({ 
+            error: 'Patient not found. Please ensure the patient exists before creating a medical record.' 
+          });
+        }
+      }
+      
+      if (recordData.doctorId) {
+        const doctor = doctors.find(d => d.id === recordData.doctorId);
+        if (!doctor) {
+          return res.status(400).json({ 
+            error: 'Doctor not found. Please ensure the doctor exists before creating a medical record.' 
+          });
+        }
+      }
+      
       medicalRecords.push(record);
       res.status(201).json(record);
     }
   } catch (error) {
     console.error('Error creating medical record:', error);
-    res.status(500).json({ error: 'Failed to create medical record' });
+    res.status(500).json({ 
+      error: 'Failed to create medical record',
+      details: error.message 
+    });
+  }
+});
+// All other existing endpoints remain the same for backward compatibility
+// Doctors
+// Enhanced Doctors endpoints with debugging and error handling
+app.get('/api/doctors', (req, res) => {
+  console.log('GET /api/doctors called');
+  console.log('Current doctors array length:', doctors.length);
+  console.log('Doctors data:', doctors);
+  
+  try {
+    res.json(doctors);
+  } catch (error) {
+    console.error('Error in GET /api/doctors:', error);
+    res.status(500).json({ error: 'Failed to fetch doctors', details: error.message });
   }
 });
 
-// All other existing endpoints remain the same for backward compatibility
-// Doctors
-app.get('/api/doctors', (req, res) => {
-  res.json(doctors);
+app.post('/api/doctors', (req, res) => {
+  console.log('POST /api/doctors called with data:', req.body);
+  
+  try {
+    const doctor = {
+      id: generateId(),
+      ...req.body,
+      createdAt: new Date().toISOString()
+    };
+    
+    doctors.push(doctor);
+    console.log('Doctor created:', doctor);
+    console.log('Total doctors now:', doctors.length);
+    
+    res.status(201).json(doctor);
+  } catch (error) {
+    console.error('Error in POST /api/doctors:', error);
+    res.status(500).json({ error: 'Failed to create doctor', details: error.message });
+  }
 });
 
-app.post('/api/doctors', (req, res) => {
-  const doctor = {
-    id: generateId(),
-    ...req.body,
-    createdAt: new Date().toISOString()
-  };
+app.get('/api/doctors/:id', (req, res) => {
+  console.log('GET /api/doctors/:id called with id:', req.params.id);
   
-  doctors.push(doctor);
-  res.status(201).json(doctor);
+  try {
+    const doctor = doctors.find(d => d.id === req.params.id);
+    if (!doctor) {
+      console.log('Doctor not found with id:', req.params.id);
+      return res.status(404).json({ error: 'Doctor not found' });
+    }
+    
+    console.log('Doctor found:', doctor);
+    res.json(doctor);
+  } catch (error) {
+    console.error('Error in GET /api/doctors/:id:', error);
+    res.status(500).json({ error: 'Failed to fetch doctor', details: error.message });
+  }
+});
+
+app.put('/api/doctors/:id', (req, res) => {
+  console.log('PUT /api/doctors/:id called with id:', req.params.id, 'and data:', req.body);
+  
+  try {
+    const index = doctors.findIndex(d => d.id === req.params.id);
+    if (index === -1) {
+      console.log('Doctor not found for update with id:', req.params.id);
+      return res.status(404).json({ error: 'Doctor not found' });
+    }
+    
+    doctors[index] = { ...doctors[index], ...req.body, updatedAt: new Date().toISOString() };
+    console.log('Doctor updated:', doctors[index]);
+    
+    res.json(doctors[index]);
+  } catch (error) {
+    console.error('Error in PUT /api/doctors/:id:', error);
+    res.status(500).json({ error: 'Failed to update doctor', details: error.message });
+  }
+});
+
+app.delete('/api/doctors/:id', (req, res) => {
+  console.log('DELETE /api/doctors/:id called with id:', req.params.id);
+  
+  try {
+    const index = doctors.findIndex(d => d.id === req.params.id);
+    if (index === -1) {
+      console.log('Doctor not found for deletion with id:', req.params.id);
+      return res.status(404).json({ error: 'Doctor not found' });
+    }
+    
+    const deletedDoctor = doctors.splice(index, 1)[0];
+    console.log('Doctor deleted:', deletedDoctor);
+    console.log('Total doctors now:', doctors.length);
+    
+    res.json({ message: 'Doctor deleted successfully', doctor: deletedDoctor });
+  } catch (error) {
+    console.error('Error in DELETE /api/doctors/:id:', error);
+    res.status(500).json({ error: 'Failed to delete doctor', details: error.message });
+  }
+});
+
+// Add a test endpoint to verify the server is working
+app.get('/api/test', (req, res) => {
+  console.log('Test endpoint called');
+  res.json({ 
+    message: 'Server is working!', 
+    timestamp: new Date().toISOString(),
+    endpoints: [
+      '/api/doctors',
+      '/api/patients', 
+      '/api/appointments',
+      '/api/medical-records'
+    ]
+  });
+});
+
+// Add endpoint to check all registered routes (for debugging)
+app.get('/api/routes', (req, res) => {
+  const routes = [];
+  app._router.stack.forEach((middleware) => {
+    if (middleware.route) {
+      routes.push({
+        path: middleware.route.path,
+        methods: Object.keys(middleware.route.methods)
+      });
+    }
+  });
+  res.json({ routes });
 });
 
 // Appointments
@@ -690,16 +927,25 @@ app.put('/api/rooms/:id', (req, res) => {
   res.json(rooms[index]);
 });
 
-// Dashboard stats with blockchain integration
 // Dashboard stats with blockchain integration - REPLACE the existing /api/stats endpoint
 app.get('/api/stats', async (req, res) => {
   try {
-    // Get blockchain stats
-    let blockchainStats = null;
+    // Get blockchain stats with better error handling
+    let blockchainStats = {
+      totalRecords: 0,
+      totalPatients: 0,
+      recentTransactions: []
+    };
+    
     try {
-      blockchainStats = await blockchainService.getBlockchainStats();
+      if (process.env.HMS_CONTRACT_ADDRESS) {
+        const result = await blockchainService.getBlockchainStats();
+        if (result.success) {
+          blockchainStats = result.stats;
+        }
+      }
     } catch (error) {
-      console.error('Blockchain stats error:', error);
+      console.error('Blockchain stats error (non-fatal):', error.message);
     }
     
     // Get MongoDB counts with fallback to in-memory
@@ -710,7 +956,7 @@ app.get('/api/stats', async (req, res) => {
       mongoPatients = await Patient.countDocuments({ isActive: true });
       mongoRecords = await MedicalRecord.countDocuments({ isActive: true });
     } catch (error) {
-      console.error('MongoDB stats error:', error);
+      console.error('MongoDB stats error (non-fatal):', error.message);
     }
     
     // Use MongoDB counts if available, otherwise use in-memory
@@ -748,8 +994,8 @@ app.get('/api/stats', async (req, res) => {
           const doctor = doctors.find(d => d.id === apt.doctorId);
           return {
             ...apt,
-            patientName: patient ? patient.name : 'Unknown',
-            doctorName: doctor ? doctor.name : 'Unknown'
+            patientName: patient ? patient.name : 'Unknown Patient',
+            doctorName: doctor ? doctor.name : 'Unknown Doctor'
           };
         }),
       
@@ -765,21 +1011,18 @@ app.get('/api/stats', async (req, res) => {
           const doctor = doctors.find(d => d.id === record.doctorId);
           return {
             ...record,
-            patientName: patient ? patient.name : 'Unknown',
-            doctorName: doctor ? doctor.name : 'Unknown'
+            patientName: patient ? patient.name : 'Unknown Patient',
+            doctorName: doctor ? doctor.name : 'Unknown Doctor'
           };
         }),
       
       // Blockchain stats
-      blockchain: blockchainStats && blockchainStats.success ? {
-        ...blockchainStats.stats,
-        totalRecords: blockchainStats.stats?.totalRecords || 0,
-        totalBlocks: blockchainStats.stats?.totalBlocks || 0,
-        recentTransactions: blockchainStats.stats?.recentTransactions || []
-      } : {
-        totalRecords: 0,
-        totalBlocks: 0,
-        recentTransactions: []
+      blockchain: {
+        totalRecords: blockchainStats.totalRecords || 0,
+        totalPatients: blockchainStats.totalPatients || 0,
+        recentTransactions: blockchainStats.recentTransactions || [],
+        contractAddress: blockchainStats.contractAddress || null,
+        network: blockchainStats.network || null
       }
     };
     
@@ -812,7 +1055,7 @@ app.get('/api/stats', async (req, res) => {
       recentRecords: [],
       blockchain: {
         totalRecords: 0,
-        totalBlocks: 0,
+        totalPatients: 0,
         recentTransactions: []
       }
     };
@@ -820,6 +1063,7 @@ app.get('/api/stats', async (req, res) => {
     res.json(fallbackStats);
   }
 });
+
 // Search endpoint
 app.get('/api/search', (req, res) => {
   const { query, type } = req.query;
