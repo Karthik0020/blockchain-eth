@@ -138,7 +138,7 @@ export const Blockchain = () => {
 
   return (
     <div className="space-y-8 animate-fadeIn">
-      {error && <Alert type="error" message={error} onClose={() => setError(null)} />}
+      {error && <Alert type="error\" message={error} onClose={() => setError(null)} />}
       
       {/* Hero Section */}
       <div className="relative overflow-hidden bg-gradient-to-br from-black to-black backdrop-blur-xl rounded-3xl border border-white p-8 hover:border-gray-600/50 transition-all duration-500 hover:scale-10 hover:shadow-2xl hover:shadow-purple-500/10">
